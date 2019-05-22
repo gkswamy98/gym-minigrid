@@ -3,9 +3,32 @@ import operator
 from functools import reduce
 
 import numpy as np
-
 import gym
 from gym import error, spaces, utils
+from .minigrid import OBJECT_TO_IDX, COLOR_TO_IDX
+from .minigrid import CELL_PIXELS
+
+class ReseedWrapper(gym.core.Wrapper):
+    """
+    Wrapper to always regenerate an environment with the same set of seeds.
+    This can be used to force an environment to always keep the same
+    configuration when reset.
+    """
+
+    def __init__(self, env, seeds=[0], seed_idx=0):
+        self.seeds = list(seeds)
+        self.seed_idx = seed_idx
+        super().__init__(env)
+
+    def reset(self, **kwargs):
+        seed = self.seeds[self.seed_idx]
+        self.seed_idx = (self.seed_idx + 1) % len(self.seeds)
+        self.env.seed(seed)
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        return obs, reward, done, info
 
 class ActionBonus(gym.core.Wrapper):
     """
@@ -15,30 +38,32 @@ class ActionBonus(gym.core.Wrapper):
     """
 
     def __init__(self, env):
+        self.__dict__.update(vars(env))  # Pass values to super wrapper
         super().__init__(env)
         self.counts = {}
 
     def step(self, action):
-
         obs, reward, done, info = self.env.step(action)
 
         env = self.unwrapped
-        tup = (env.agentPos, env.agentDir, action)
+        tup = (tuple(env.agent_pos), env.agent_dir, action)
 
         # Get the count for this (s,a) pair
-        preCnt = 0
+        pre_count = 0
         if tup in self.counts:
-            preCnt = self.counts[tup]
+            pre_count = self.counts[tup]
 
         # Update the count for this (s,a) pair
-        newCnt = preCnt + 1
-        self.counts[tup] = newCnt
+        new_count = pre_count + 1
+        self.counts[tup] = new_count
 
-        bonus = 1 / math.sqrt(newCnt)
-
+        bonus = 1 / math.sqrt(new_count)
         reward += bonus
 
         return obs, reward, done, info
+
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
 
 class StateBonus(gym.core.Wrapper):
     """
@@ -47,32 +72,34 @@ class StateBonus(gym.core.Wrapper):
     """
 
     def __init__(self, env):
+        self.__dict__.update(vars(env))  # Pass values to super wrapper
         super().__init__(env)
         self.counts = {}
 
     def step(self, action):
-
         obs, reward, done, info = self.env.step(action)
 
         # Tuple based on which we index the counts
         # We use the position after an update
         env = self.unwrapped
-        tup = (env.agentPos)
+        tup = (tuple(env.agent_pos))
 
         # Get the count for this key
-        preCnt = 0
+        pre_count = 0
         if tup in self.counts:
-            preCnt = self.counts[tup]
+            pre_count = self.counts[tup]
 
         # Update the count for this key
-        newCnt = preCnt + 1
-        self.counts[tup] = newCnt
+        new_count = pre_count + 1
+        self.counts[tup] = new_count
 
-        bonus = 1 / math.sqrt(newCnt)
-
+        bonus = 1 / math.sqrt(new_count)
         reward += bonus
 
         return obs, reward, done, info
+
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
 
 class ImgObsWrapper(gym.core.ObservationWrapper):
     """
@@ -80,13 +107,35 @@ class ImgObsWrapper(gym.core.ObservationWrapper):
     """
 
     def __init__(self, env):
+        self.__dict__.update(vars(env))  # Pass values to super wrapper
         super().__init__(env)
-        # Hack to pass values to super wrapper
-        self.__dict__.update(vars(env))
+
         self.observation_space = env.observation_space.spaces['image']
 
     def observation(self, obs):
         return obs['image']
+
+class RGBImgObsWrapper(gym.core.ObservationWrapper):
+    """
+    Wrapper to use fully observable RGB image as the only observation output,
+    no language/mission. This can be used to have the agent to solve the
+    gridworld in pixel space.
+    """
+
+    def __init__(self, env):
+        self.__dict__.update(vars(env))  # Pass values to super wrapper
+        super().__init__(env)
+
+        self.observation_space = spaces.Box(
+            low=0,
+            high=255,
+            shape=(self.env.width*CELL_PIXELS, self.env.height*CELL_PIXELS, 3),
+            dtype='uint8'
+        )
+
+    def observation(self, obs):
+        env = self.unwrapped
+        return env.render(mode = 'rgb_array', highlight = False)
 
 class FullyObsWrapper(gym.core.ObservationWrapper):
     """
@@ -94,8 +143,9 @@ class FullyObsWrapper(gym.core.ObservationWrapper):
     """
 
     def __init__(self, env):
+        self.__dict__.update(vars(env))  # Pass values to super wrapper
         super().__init__(env)
-        self.__dict__.update(vars(env))  # hack to pass values to super wrapper
+
         self.observation_space = spaces.Box(
             low=0,
             high=255,
@@ -104,8 +154,14 @@ class FullyObsWrapper(gym.core.ObservationWrapper):
         )
 
     def observation(self, obs):
-        full_grid = self.env.grid.encode()
-        full_grid[self.env.agent_pos[0]][self.env.agent_pos[1]] = np.array([255, self.env.agent_dir, 0])
+        env = self.unwrapped
+        full_grid = env.grid.encode()
+        full_grid[env.agent_pos[0]][env.agent_pos[1]] = np.array([
+            OBJECT_TO_IDX['agent'],
+            COLOR_TO_IDX['red'],
+            env.agent_dir
+        ])
+
         return full_grid
 
 class FlatObsWrapper(gym.core.ObservationWrapper):
@@ -114,7 +170,8 @@ class FlatObsWrapper(gym.core.ObservationWrapper):
     and combine these with observed images into one flat array
     """
 
-    def __init__(self, env, maxStrLen=64):
+    def __init__(self, env, maxStrLen=96):
+        self.__dict__.update(vars(env))  # Pass values to super wrapper
         super().__init__(env)
 
         self.maxStrLen = maxStrLen
@@ -139,7 +196,7 @@ class FlatObsWrapper(gym.core.ObservationWrapper):
 
         # Cache the last-encoded mission string
         if mission != self.cachedStr:
-            assert len(mission) <= self.maxStrLen, "mission string too long"
+            assert len(mission) <= self.maxStrLen, 'mission string too long ({} chars)'.format(len(mission))
             mission = mission.lower()
 
             strArray = np.zeros(shape=(self.maxStrLen, self.numCharCodes), dtype='float32')
@@ -159,18 +216,17 @@ class FlatObsWrapper(gym.core.ObservationWrapper):
 
         return obs
 
-
 class AgentViewWrapper(gym.core.Wrapper):
     """
     Wrapper to customize the agent's field of view.
     """
 
     def __init__(self, env, agent_view_size=7):
+        self.__dict__.update(vars(env))  # Pass values to super wrapper
         super(AgentViewWrapper, self).__init__(env)
-        self.__dict__.update(vars(env))  # Hack to pass values to super wrapper
 
         # Override default view size
-        env.agent_view_size = agent_view_size
+        env.unwrapped.agent_view_size = agent_view_size
 
         # Compute observation space with specified view size
         observation_space = gym.spaces.Box(
@@ -184,3 +240,9 @@ class AgentViewWrapper(gym.core.Wrapper):
         self.observation_space = spaces.Dict({
             'image': observation_space
         })
+
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        return self.env.step(action)
